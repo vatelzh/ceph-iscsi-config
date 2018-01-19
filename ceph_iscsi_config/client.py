@@ -664,3 +664,29 @@ class CHAP(object):
     chap_str = property(_get_chap_str,
                         _set_chap_str,
                         doc="get/set the chap string (user/password)")
+
+
+def define_clients(logger, config):
+    """
+    define the clients (nodeACLs) to the gateway definition
+    """
+
+    for client_iqn in config.config['clients']:
+        client_metadata = config.config['clients'][client_iqn]
+        client_chap = CHAP(client_metadata['auth']['chap'])
+
+        image_list = client_metadata['luns'].keys()
+
+        chap_str = client_chap.chap_str
+        if client_chap.error:
+            logger.debug("Password decode issue : "
+                         "{}".format(client_chap.error_msg))
+            halt("Unable to decode password for "
+                 "{}".format(client_iqn))
+
+        client = GWClient(logger,
+                          client_iqn,
+                          image_list,
+                          chap_str)
+
+        client.manage('present')  # ensure the client exists

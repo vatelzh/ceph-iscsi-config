@@ -15,7 +15,7 @@ import ceph_iscsi_config.settings as settings
 
 from ceph_iscsi_config.common import Config
 # from ceph_iscsi_config.alua import ALUATargetPortGroup
-from ceph_iscsi_config.utils import convert_2_bytes, get_pool_id
+from ceph_iscsi_config.utils import convert_2_bytes, get_pool_id, human_size
 
 
 __author__ = 'pcuzner@redhat.com'
@@ -726,3 +726,66 @@ def rados_pool(conf=None, pool='rbd'):
         pool_list = cluster.list_pools()
 
     return pool in pool_list
+
+def define_luns(logger, config, gateway):
+    """
+    define the disks in the config to LIO
+    :param gateway: (object) gateway object used for mapping
+    :return: None
+    """
+
+    local_gw = this_host()
+    # sort the disks dict keys, so the disks are registered in a specific
+    # sequence
+    disks = config.config['disks']
+    srtd_disks = sorted(disks)
+    pools = {disks[disk_key]['pool'] for disk_key in srtd_disks}
+
+    if pools:
+        with rados.Rados(conffile=settings.config.cephconf) as cluster:
+
+            for pool in pools:
+
+                logger.debug("Processing rbd's in '{}' pool".format(pool))
+
+                with cluster.open_ioctx(pool) as ioctx:
+
+                    pool_disks = [disk_key for disk_key in srtd_disks
+                                  if disk_key.startswith(pool)]
+                    for disk_key in pool_disks:
+
+                        pool, image_name = disk_key.split('.')
+
+                        try:
+                            with rbd.Image(ioctx, image_name) as rbd_image:
+                                image_bytes = rbd_image.size()
+                                image_size_h = human_size(image_bytes)
+
+                                lun = LUN(logger, pool, image_name,
+                                          image_size_h, local_gw)
+                                if lun.error:
+                                    halt("Error defining rbd image "
+                                         "{}".format(disk_key))
+
+                                lun.allocate()
+                                if lun.error:
+                                    halt("Error unable to register {} with "
+                                         "LIO - {}".format(disk_key,
+                                                           lun.error_msg))
+
+                        except rbd.ImageNotFound:
+                            halt("Disk '{}' defined to the config, but image "
+                                 "'{}' can not be found in "
+                                 "'{}' pool".format(disk_key,
+                                                    image_name,
+                                                    pool))
+
+        # Gateway Mapping : Map the LUN's registered to all tpg's within the
+        # LIO target
+        gateway.manage('map')
+        if gateway.error:
+            halt("Error mapping the LUNs to the tpg's within the iscsi Target")
+
+    else:
+        logger.info("No LUNs to export")
+
